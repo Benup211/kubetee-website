@@ -19,6 +19,38 @@ const usdLast30d = fills
   .filter((f) => Date.parse(f.ts) >= cutoff30d)
   .reduce((sum, f) => sum + (f.usdValue ?? 0), 0);
 
+// Chart: daily USD totals across a continuous 30-day UTC axis (zero-filled
+// so gap days read as gaps, not as missing data). Multiple fills on one day
+// (rare) are summed into that day's bar.
+const utcDay = (ts) => new Date(ts).toISOString().slice(0, 10);
+const usdByDay = new Map();
+for (const f of fills) {
+  if (Date.parse(f.ts) < cutoff30d) continue;
+  const k = utcDay(f.ts);
+  usdByDay.set(k, (usdByDay.get(k) ?? 0) + (f.usdValue ?? 0));
+}
+const chartDays = [];
+if (lastFill) {
+  const end = new Date(`${lastFill.toISOString().slice(0, 10)}T00:00:00Z`);
+  for (let i = 29; i >= 0; i--) {
+    const d = new Date(end.getTime() - i * 86400000);
+    const key = d.toISOString().slice(0, 10);
+    chartDays.push({ key, date: d, usd: usdByDay.get(key) ?? 0 });
+  }
+}
+const chartMax = Math.max(1, ...chartDays.map((d) => d.usd));
+const peakDay = chartDays.reduce(
+  (p, d) => (d.usd > p.usd ? d : p),
+  { usd: 0, date: null },
+);
+
+// Table: last 10 fills visible; older rows behind a toggle. Charts prove the
+// trend — the per-extrinsic rows prove the evidence — most visitors only
+// need the recent ones.
+const RECENT_ROWS = 10;
+const recentFills = fills.slice(0, RECENT_ROWS);
+const olderFills = fills.slice(RECENT_ROWS);
+
 const fmtUsd = (v) =>
   v >= 1000
     ? `$${(v / 1000).toFixed(v >= 10000 ? 0 : 1)}k`
@@ -105,6 +137,69 @@ const generatedAt = new Date(raw.generatedAt);
       <div class="container">
         <span class="section-label">Recycle history</span>
         <h2>Every swap, with its extrinsic</h2>
+
+        {chartDays.length > 0 && (
+          <figure class="chart">
+            <figcaption>
+              <span class="chart-title">Daily revenue · last 30 days</span>
+              <span class="chart-sub">
+                {fmtUsd(usdLast30d)} total
+                {peakDay.date && (
+                  <>· peak {fmtUsd(peakDay.usd)} on {fmtTs(peakDay.date)}</>
+                )}
+              </span>
+            </figcaption>
+            <div class="chart-scroll">
+              <svg
+                viewBox="0 0 700 220"
+                role="img"
+                aria-label={`Bar chart of daily recycled revenue in USD for the last 30 days, totaling ${fmtUsd(usdLast30d)}`}
+              >
+                {/* gridlines at 25% / 50% / 75% of the max */}
+                {[0.25, 0.5, 0.75].map((frac) => (
+                  <line
+                    class="grid"
+                    x1="0"
+                    y1={180 - frac * 160}
+                    x2="700"
+                    y2={180 - frac * 160}
+                  />
+                ))}
+                {chartDays.map((d, i) => {
+                  const barW = 700 / chartDays.length;
+                  const h = Math.max(d.usd > 0 ? 2 : 0, (d.usd / chartMax) * 160);
+                  return (
+                    <g class={d.usd > 0 ? 'bar' : 'bar empty'}>
+                      <rect
+                        x={i * barW + barW * 0.15}
+                        y={180 - h}
+                        width={barW * 0.7}
+                        height={h}
+                        rx="2">
+                        <title>
+                          {`${d.key} · $${d.usd.toFixed(0)}`}
+                        </title>
+                      </rect>
+                    </g>
+                  );
+                })}
+                {/* x-axis labels every 7 days + the last day */}
+                {chartDays
+                  .map((d, i) => ({ d, i }))
+                  .filter(({ i }) => i % 7 === 0 || i === chartDays.length - 1)
+                  .map(({ d, i }) => (
+                    <text
+                      class="axis-label"
+                      x={(i + 0.5) * (700 / chartDays.length)}
+                      y="200">
+                      {fmtTs(d.date)}
+                    </text>
+                  ))}
+              </svg>
+            </div>
+          </figure>
+        )}
+
         <div class="table-wrap">
           <table>
             <thead>
@@ -119,13 +214,15 @@ const generatedAt = new Date(raw.generatedAt);
             </thead>
             <tbody>
               {
-                fills.map((f) => (
+                recentFills.map((f) => (
                   <tr>
                     <td>{fmtTs(f.ts)}</td>
                     <td class="num">{f.sn28Alpha.toFixed(1)}</td>
                     <td class="num accent">{f.sn90Alpha.toFixed(1)}</td>
                     <td class="num">{f.taoValue.toFixed(2)}</td>
-                    <td class="num">${f.usdValue.toFixed(0)}</td>
+                    <td class="num">
+                      {f.usdValue != null ? `$${f.usdValue.toFixed(0)}` : '—'}
+                    </td>
                     <td>
                       <a href={f.link} rel="noopener" class="mono" target="_blank">
                         {f.extrinsic}
@@ -134,6 +231,48 @@ const generatedAt = new Date(raw.generatedAt);
                   </tr>
                 ))
               }
+              {olderFills.length > 0 && (
+                <tr class="older-toggle-row">
+                  <td colspan="6">
+                    <button type="button" class="older-toggle">
+                      <span class="older-toggle-label">
+                        Show {olderFills.length} earlier fill{olderFills.length === 1 ? '' : 's'}
+                      </span>
+                      <svg class="chev" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+                        <path d="M2 4l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+                      </svg>
+                    </button>
+                  </td>
+                </tr>
+              )}
+              {olderFills.map((f) => (
+                <tr class="older-row" hidden>
+                  <td>{fmtTs(f.ts)}</td>
+                  <td class="num">{f.sn28Alpha.toFixed(1)}</td>
+                  <td class="num accent">{f.sn90Alpha.toFixed(1)}</td>
+                  <td class="num">{f.taoValue.toFixed(2)}</td>
+                  <td class="num">
+                    {f.usdValue != null ? `$${f.usdValue.toFixed(0)}` : '—'}
+                  </td>
+                  <td>
+                    <a href={f.link} rel="noopener" class="mono" target="_blank">
+                      {f.extrinsic}
+                    </a>
+                  </td>
+                </tr>
+              ))}
+              {olderFills.length > 0 && (
+                <tr class="older-collapse-row" hidden>
+                  <td colspan="6">
+                    <button type="button" class="older-toggle close">
+                      <span class="older-toggle-label">Collapse history</span>
+                      <svg class="chev up" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+                        <path d="M2 8l4-4 4 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+                      </svg>
+                    </button>
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -219,6 +358,32 @@ const generatedAt = new Date(raw.generatedAt);
   </footer>
 
   <script is:inline>
+    // Fill-history toggle: show/collapse the pre-recent rows. Purely local —
+    // the older rows ship in the HTML (hidden), so no-JS visitors still get
+    // the full table if they view source; the toggle only flips visibility.
+    (function () {
+      var table = document.querySelector('.fills table');
+      if (!table) return;
+      var olderRows = Array.from(table.querySelectorAll('tr.older-row'));
+      var collapseRow = table.querySelector('tr.older-collapse-row');
+      var openBtns = Array.from(table.querySelectorAll('.older-toggle:not(.close)'));
+      var closeBtn = table.querySelector('.older-toggle.close');
+      if (!olderRows.length || !openBtns.length || !closeBtn || !collapseRow) return;
+      function open() {
+        olderRows.forEach(function (r) { r.hidden = false; });
+        openBtns.forEach(function (b) { b.closest('tr').hidden = true; });
+        collapseRow.hidden = false;
+      }
+      function close() {
+        olderRows.forEach(function (r) { r.hidden = true; });
+        openBtns.forEach(function (b) { b.closest('tr').hidden = false; });
+        collapseRow.hidden = true;
+        collapseRow.scrollIntoView({ block: 'center' });
+      }
+      openBtns.forEach(function (b) { b.addEventListener('click', open); });
+      closeBtn.addEventListener('click', close);
+    })();
+
     // Staleness badge — static date line above stays authoritative for
     // no-JS visitors. No network calls; computed at page load.
     (function () {
@@ -354,6 +519,49 @@ const generatedAt = new Date(raw.generatedAt);
   }
   .stat-sub { font-size: 13px; color: var(--text-muted); }
 
+  /* Daily-revenue chart */
+  .chart {
+    margin: 36px 0 8px;
+    padding: 20px 20px 12px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+  }
+  .chart figcaption {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+  .chart-title {
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  .chart-sub {
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+  .chart-scroll { overflow-x: auto; }
+  .chart svg { display: block; width: 100%; height: auto; min-width: 560px; }
+  .chart .grid {
+    stroke: var(--border);
+    stroke-width: 1;
+    stroke-dasharray: 3 4;
+  }
+  .chart .bar rect {
+    fill: var(--accent);
+    fill-opacity: 0.75;
+  }
+  .chart .bar.empty rect { fill: var(--text-faint); fill-opacity: 0.18; }
+  .chart .bar rect:hover { fill-opacity: 1; }
+  .chart .axis-label {
+    fill: var(--text-faint);
+    font-size: 11px;
+    text-anchor: middle;
+  }
+
   /* Tables */
   .fills, .sn28 { padding: 56px 0; }
   .fills { background: var(--bg-elevated); border-top: 1px solid var(--border); }
@@ -412,6 +620,30 @@ const generatedAt = new Date(raw.generatedAt);
     outline: 1px solid var(--accent-border);
     outline-offset: -1px;
   }
+
+  /* Fill-history toggle rows */
+  .older-toggle-row td, .older-collapse-row td {
+    padding: 10px 16px;
+    text-align: center;
+    background: var(--bg-elevated);
+  }
+  .older-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 16px;
+    border-radius: 99px;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--text-muted);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .older-toggle:hover { color: var(--accent); border-color: var(--accent-border); }
+  .older-toggle .chev { transition: transform 0.2s; }
+  .chev.up path { transform: rotate(180deg); transform-origin: center; }
   .table-note {
     margin-top: 14px;
     font-size: 13px;
