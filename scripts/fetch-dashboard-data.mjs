@@ -89,8 +89,8 @@ async function get(path) {
   throw lastErr;
 }
 
-// TODO: maxPages=5 caps the metagraph at 250 hotkeys (50/page) and fills at 250
-// rows. SN28 is at 250/256 slots — bump maxPages when the subnet fills up.
+// Taostats v1 metagraph serves up to 256 rows/page (one subnet fits in a
+// single page), so maxPages=5 x limit=50 has ample headroom even at 256 neurons.
 async function getPaginated(path, maxPages = 5) {
   const all = [];
   let page = 1;
@@ -111,9 +111,11 @@ async function getPaginated(path, maxPages = 5) {
 async function getFills({ light = false } = {}) {
   // light mode (settle polling): page 1 only — enough to check the newest fill.
   // Full mode (post-settle): all pages (limit 50/page, max 5).
+  // Taostats v1 API (old /api/* paths retire 2026-11-09): /v1/subnets/swaps,
+  // order=timestamp_desc -> order_by=timestamp&order_dir=desc.
   const path =
-    `/api/dtao/trade/v1?coldkey=${KUBETEE_COLDKEY}` +
-    `&from_name=SN28&to_name=SN90&order=timestamp_desc&limit=50`;
+    `/v1/subnets/swaps?coldkey=${KUBETEE_COLDKEY}` +
+    `&from_name=SN28&to_name=SN90&order_by=timestamp&order_dir=desc&limit=50`;
   if (light) {
     const { data } = await get(`${path}&page=1`);
     return data;
@@ -130,11 +132,11 @@ function mapFill(t) {
   return {
     ts: t.timestamp,
     block: t.block_number,
-    extrinsic: t.extrinsic_id,
+    extrinsic: t.extrinsic_id, // v1 API: "block-index" string, was numeric
     sn28Alpha: Number(t.from_amount) / 1e9,
     sn90Alpha: Number(t.to_amount) / 1e9,
     taoValue: Number(t.tao_value) / 1e9,
-    usdValue: Number(t.usd_value),
+    usdValue: t.usd_value != null ? Number(t.usd_value) : null,
     link: `https://www.tao.app/extrinsic/${t.extrinsic_id}`,
   };
 }
@@ -145,26 +147,30 @@ function sn28PriceFromFill(fill) {
 }
 
 async function fetchSn28PoolPrice() {
-  const { data } = await get('/api/dtao/pool/latest/v1?netuid=28');
+  // Taostats v1 API: /v1/subnets/pools; total_tao renamed tao_in_pool and
+  // both fields are RAO decimal strings now, so the ratio keeps the 1e9
+  // TAO conversion on both sides.
+  const { data } = await get('/v1/subnets/pools?netuid=28');
   const row = data?.[0];
   if (!row) return null;
   const price = Number(row.price);
   if (Number.isFinite(price) && price > 0) return price;
-  // fallback within the pool payload: total_tao (RAO) / alpha_in_pool (human-scale)
+  // fallback within the pool payload: tao_in_pool (RAO) / alpha_in_pool (RAO)
   const alpha = Number(row.alpha_in_pool);
-  const tao = Number(row.total_tao);
+  const tao = Number(row.tao_in_pool);
   if (Number.isFinite(alpha) && Number.isFinite(tao) && alpha > 0) {
-    return (tao / 1e9) / alpha;
+    return (tao / 1e9) / (alpha / 1e9);
   }
   return null;
 }
 
 async function fetchOurStake() {
-  // metagraph page 1 (uid_asc, limit 50) — UID 44 is on page 1
+  // Taostats v1 API: /v1/subnets/metagraph (order_by/order_dir replace the
+  // old order=uid_asc; limit max 256 — one subnet fits in a single page).
   const { data } = await get(
-    '/api/metagraph/latest/v1?netuid=28&order=uid_asc&limit=50&page=1',
+    '/v1/subnets/metagraph?netuid=28&order_by=uid&order_dir=asc&limit=50&page=1',
   );
-  const ours = data.find((n) => n.hotkey?.ss58 === KUBETEE_SN28_HOTKEY);
+  const ours = data.find((n) => n.hotkey === KUBETEE_SN28_HOTKEY);
   if (!ours) return { found: false, stake: null };
   return { found: true, stake: Number(ours.total_alpha_stake) / 1e9 };
 }
@@ -241,19 +247,19 @@ const settled = await pollUntilSettled();
 // Full fills fetch (all pages) + full metagraph fetch (once, post-settle)
 const fullFills = await getFills();
 const neurons = await getPaginated(
-  '/api/metagraph/latest/v1?netuid=28&order=uid_asc&limit=50',
+  '/v1/subnets/metagraph?netuid=28&order_by=uid&order_dir=asc&limit=50',
 );
 const sn28 = neurons.map((n) => ({
   uid: n.uid,
-  hotkey: n.hotkey.ss58,
-  coldkey: n.coldkey.ss58,
+  hotkey: n.hotkey,
+  coldkey: n.coldkey,
   incentive: Number(n.incentive),
   emission: Number(n.emission) / 1e9,
   dailyMiningAlpha: n.daily_mining_alpha ? Number(n.daily_mining_alpha) / 1e9 : null,
   alphaStake: Number(n.total_alpha_stake) / 1e9,
   validatorPermit: n.validator_permit,
   isOwner: n.is_owner_hotkey === true,
-  isKubeTEE: n.hotkey.ss58 === KUBETEE_SN28_HOTKEY,
+  isKubeTEE: n.hotkey === KUBETEE_SN28_HOTKEY,
   active: n.active,
   rank: n.rank,
   registeredAtBlock: n.registered_at_block,
@@ -266,7 +272,7 @@ const totals = recycle.reduce(
     sn28Alpha: acc.sn28Alpha + r.sn28Alpha,
     sn90Alpha: acc.sn90Alpha + r.sn90Alpha,
     taoValue: acc.taoValue + r.taoValue,
-    usdValue: acc.usdValue + r.usdValue,
+    usdValue: acc.usdValue + (r.usdValue ?? 0), // v1 API: usd_value nullable
   }),
   { sn28Alpha: 0, sn90Alpha: 0, taoValue: 0, usdValue: 0 },
 );
