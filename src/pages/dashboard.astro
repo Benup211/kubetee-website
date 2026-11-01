@@ -11,11 +11,13 @@ const fills = raw.recycle.fills;
 const totals = raw.recycle.totals;
 const firstFill = fills.length > 0 ? new Date(fills[fills.length - 1].ts) : null;
 const lastFill = fills.length > 0 ? new Date(fills[0].ts) : null;
-const days =
-  firstFill && lastFill
-    ? Math.max(1, Math.round((lastFill - firstFill) / 86400000))
-    : 0;
-const avgUsdPerDay = days > 0 ? totals.usdValue / days : 0;
+// Rolling 30-day revenue, anchored to the newest fill so the window always
+// spans exactly the last 30 days of on-chain swaps (fills are daily; the
+// pipeline can be ~1 day stale). usdValue is nullable in the Taostats v1 API.
+const cutoff30d = lastFill ? lastFill.getTime() - 30 * 86400000 : 0;
+const usdLast30d = fills
+  .filter((f) => Date.parse(f.ts) >= cutoff30d)
+  .reduce((sum, f) => sum + (f.usdValue ?? 0), 0);
 
 const fmtUsd = (v) =>
   v >= 1000
@@ -86,9 +88,9 @@ const generatedAt = new Date(raw.generatedAt);
             <span class="stat-sub">SN28 α → SN90 α</span>
           </div>
           <div class="stat-card">
-            <span class="stat-label">Average / day</span>
-            <span class="stat-value">{fmtUsd(avgUsdPerDay)}</span>
-            <span class="stat-sub">over {days} days</span>
+            <span class="stat-label">Revenue · 30d</span>
+            <span class="stat-value">{fmtUsd(usdLast30d)}</span>
+            <span class="stat-sub">last 30 days of swaps</span>
           </div>
           <div class="stat-card">
             <span class="stat-label">SN90 α recycled</span>
